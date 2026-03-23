@@ -1,5 +1,7 @@
 data/
+models/
 venv/
+venv_tinychart/
 __pycache__/
 .env
 .DS_Store
