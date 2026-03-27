@@ -1,7 +1,9 @@
+532-env/
 data/
 models/
 venv/
-venv_tinychart/
+.venv_tinychart/
+requirements.txt
 __pycache__/
 .env
 .DS_Store
