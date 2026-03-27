@@ -37,7 +37,7 @@ print("Model loaded successfully!")
 print(f"Model device: {device}")
 
 image = Image.open(IMAGE_PATH).convert("RGB")
-print(f"Image loaded: {image.size}")
+print(f"Image loaded: {image.size} , {IMAGE_PATH}")
 
 image_tensor = process_images([image], image_processor, model.config)[0]
 image_tensor = image_tensor.unsqueeze(0).to(device, dtype=torch.float32)

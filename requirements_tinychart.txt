@@ -93,7 +93,7 @@ torch==2.0.1
 torchvision==0.15.2
 tqdm==4.67.3
 transformers==4.37.2
-trl==0.12.2
+# trl==0.12.2
 typing_extensions==4.15.0
 tzdata==2025.3
 uc-micro-py==2.0.0
