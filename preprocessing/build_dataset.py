@@ -1,7 +1,15 @@
 import os
 import json
+import sys
+from pathlib import Path
+
 import pandas as pd
 from PIL import Image
+
+_PRE = Path(__file__).resolve().parent
+if str(_PRE) not in sys.path:
+    sys.path.insert(0, str(_PRE))
+from vcot_target import TARGET_SEP
 
 # =========================
 # PATHS (EDIT IF NEEDED)
@@ -169,7 +177,7 @@ for root, dirs, files in os.walk(BASE_FIXATION):
         # Convert to tokens
         click_tokens = clicks_to_tokens(clicks)
 
-        target = click_tokens + " | <sep> | " + answer
+        target = click_tokens + TARGET_SEP + answer
 
         sample = {
             "image": image_path,
