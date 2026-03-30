@@ -1,6 +1,14 @@
 import json
 import random
+import sys
+from pathlib import Path
+
 from PIL import Image
+
+_PRE = Path(__file__).resolve().parent
+if str(_PRE) not in sys.path:
+    sys.path.insert(0, str(_PRE))
+from vcot_target import parse_vcot_target
 
 with open("data/vcot_dataset.json") as f:
     data = json.load(f)
@@ -13,7 +21,10 @@ for i in range(5):
 
     print("\n--- SAMPLE ---")
     print("Prompt:", sample["prompt"])
-    print("Target:", sample["target"])
+    clicks, answer = parse_vcot_target(sample["target"])
+    print("Target (full):", sample["target"])
+    print("Target (clicks part):", clicks[:120] + ("..." if len(clicks) > 120 else ""))
+    print("Target (answer after <sep>):", repr(answer))
 
     # Check image loads
     try:
