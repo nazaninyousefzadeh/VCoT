@@ -8,9 +8,22 @@ Dataset `target` format: "{clicks} | <sep> | {answer}" — the final answer stri
 is after `` | <sep> | `` (see preprocessing/vcot_target.py).
 
 Usage:
+  # Zero-shot baseline
   venv/bin/python scripts/inference_qwen.py --output data/qwen_responses.json
-  venv/bin/python scripts/inference_qwen.py --output data/qwen_responses.json --limit 1000
-  venv/bin/python scripts/inference_qwen.py --output data/qwen_responses.json --start 500 --limit 200
+
+  # Static saliency baseline (pre-generate overlays first)
+  venv/bin/python scripts/make_saliency_overlays.py
+  venv/bin/python scripts/inference_qwen.py \
+      --dataset data/vcot_dataset_saliency.json \
+      --output data/qwen_responses_saliency.json
+
+  # Fine-tuned model
+  venv/bin/python scripts/inference_qwen.py \
+      --adapter_path runs/qwen_lora/best \
+      --output data/qwen_ft.json
+
+  # Resuming a partial run
+  venv/bin/python scripts/inference_qwen.py --start 1500 --output data/qwen_responses.json
 """
 
 import argparse
@@ -18,10 +31,10 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import torch
 from PIL import Image
+from peft import PeftModel
 from tqdm import tqdm
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
@@ -43,9 +56,16 @@ def _ground_truth_fields(target: str) -> dict:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", default="data/vcot_dataset_unique.json")
+    p.add_argument("--dataset", default="data/vcot_dataset_unique.json",
+                   help="Dataset JSON (use data/vcot_dataset_saliency.json for saliency baseline)")
     p.add_argument("--output", default="data/qwen_responses.json")
     p.add_argument("--model_name", default="Qwen/Qwen2-VL-2B-Instruct")
+    p.add_argument(
+        "--adapter_path",
+        type=str,
+        default=None,
+        help="LoRA folder from finetuning (e.g. runs/qwen_lora/best)",
+    )
     p.add_argument("--max_new_tokens", type=int, default=256)
     p.add_argument("--start", type=int, default=0, help="Start index (for resuming)")
     p.add_argument("--limit", type=int, default=None, help="Max samples to process")
@@ -60,6 +80,7 @@ def main():
 
     end = args.start + args.limit if args.limit else len(data)
     data = data[args.start:end]
+    print(f"Dataset: {args.dataset}")
     print(f"Processing samples {args.start} to {args.start + len(data)}")
 
     # Load existing results if resuming
@@ -70,6 +91,9 @@ def main():
         print(f"Loaded {len(results)} existing results")
 
     print(f"Loading model: {args.model_name}")
+    if args.adapter_path:
+        print(f"LoRA adapter: {args.adapter_path}")
+
     if torch.backends.mps.is_available():
         device = torch.device("mps")
         dtype = torch.float16
@@ -86,24 +110,25 @@ def main():
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         args.model_name, torch_dtype=dtype
     ).to(device)
-    processor = AutoProcessor.from_pretrained(args.model_name)
+    if args.adapter_path:
+        model = PeftModel.from_pretrained(model, args.adapter_path)
+    proc_src = args.adapter_path or args.model_name
+    processor = AutoProcessor.from_pretrained(proc_src)
     print(f"Model loaded on {device}")
 
-    for i, sample in enumerate(tqdm[Any](data, desc="Inference")):
+    for i, sample in enumerate(tqdm(data, desc="Inference")):
         idx = args.start + i
         try:
             image = Image.open(sample["image"]).convert("RGB")
         except Exception as e:
-            results.append(
-                {
-                    "index": idx,
-                    "image": sample["image"],
-                    "prompt": sample["prompt"],
-                    **_ground_truth_fields(sample["target"]),
-                    "response": None,
-                    "error": str(e),
-                }
-            )
+            results.append({
+                "index": idx,
+                "image": sample["image"],
+                "prompt":sample["prompt"],
+                **_ground_truth_fields(sample["target"]),
+                "response": None,
+                "error": str(e),
+            })
             continue
 
         messages = [
@@ -127,15 +152,13 @@ def main():
 
         response = processor.batch_decode(output_ids, skip_special_tokens=True)[0]
 
-        results.append(
-            {
-                "index": idx,
-                "image": sample["image"],
-                "prompt": sample["prompt"],
-                **_ground_truth_fields(sample["target"]),
-                "response": response,
-            }
-        )
+        results.append({
+            "index": idx,
+            "image": sample["image"],
+            "prompt": sample["prompt"],
+            **_ground_truth_fields(sample["target"]),
+            "response": response,
+        })
 
         if (i + 1) % 100 == 0:
             with open(args.output, "w") as f:
