@@ -98,7 +98,7 @@ def main():
                 {
                     "index": idx,
                     "image": sample["image"],
-                    "prompt": sample["prompt"],
+                    "prompt": f"Answer the question about this chart in as few words as possible.\n\n{sample['prompt']}",
                     **_ground_truth_fields(sample["target"]),
                     "response": None,
                     "error": str(e),
@@ -111,7 +111,7 @@ def main():
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": sample["prompt"]},
+                    {"type": "text", "text": f"Answer the question about this chart in as few words as possible.\n\n{sample['prompt']}"},
                 ],
             }
         ]
@@ -131,7 +131,7 @@ def main():
             {
                 "index": idx,
                 "image": sample["image"],
-                "prompt": sample["prompt"],
+                "prompt": f"Answer the question about this chart in as few words as possible.\n\n{sample['prompt']}",
                 **_ground_truth_fields(sample["target"]),
                 "response": response,
             }

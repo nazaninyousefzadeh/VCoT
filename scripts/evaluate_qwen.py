@@ -139,6 +139,56 @@ def answers_match(prediction_raw: str | None, ground_truth: str | None) -> bool:
         return True
     return False
 
+def compute_error(prediction_raw: str | None, ground_truth: str | None) -> dict:
+    """
+    Returns a dict with:
+    - type: "numeric" or "text" or "none"
+    - value: error metric (float or int)
+    """
+    pred = normalize_prediction(prediction_raw)
+    gt = normalize_ground_truth(ground_truth)
+
+    if not pred or not gt:
+        return {"type": "none", "value": None}
+
+    # --- NUMERIC CASE ---
+    gt_num = parse_ground_truth_number(ground_truth)
+    if gt_num is not None:
+        pred_numbers = numbers_in_text(pred)
+        if not pred_numbers:
+            return {"type": "numeric", "value": None}
+
+        # take closest number in prediction
+        closest = min(pred_numbers, key=lambda x: abs(x - gt_num))
+
+        if gt_num == 0:
+            error = abs(closest - gt_num)
+        else:
+            error = abs(closest - gt_num) / abs(gt_num) * 100
+
+        return {"type": "numeric", "value": error}
+
+    # --- TEXT CASE (edit distance) ---
+    def levenshtein(a: str, b: str) -> int:
+        dp = [[0]*(len(b)+1) for _ in range(len(a)+1)]
+        for i in range(len(a)+1):
+            dp[i][0] = i
+        for j in range(len(b)+1):
+            dp[0][j] = j
+
+        for i in range(1, len(a)+1):
+            for j in range(1, len(b)+1):
+                cost = 0 if a[i-1] == b[j-1] else 1
+                dp[i][j] = min(
+                    dp[i-1][j] + 1,      # delete
+                    dp[i][j-1] + 1,      # insert
+                    dp[i-1][j-1] + cost  # substitute
+                )
+        return dp[-1][-1]
+
+    dist = levenshtein(pred, gt)/len(gt)
+
+    return {"type": "text", "value": dist}
 
 def build_salchartqa_lookup(csv_path: Path) -> SalchartqaLookup:
     """
@@ -210,6 +260,8 @@ def accuracy(results: list[dict[str, Any]]) -> tuple[float, int, int]:
         scored += 1
         if answers_match(row.get("response"), row.get("ground_truth_answer")):
             correct += 1
+        else:
+            row["computed_error"] = compute_error(row.get("response"),row.get("ground_truth_answer"))
     if scored == 0:
         return 0.0, 0, 0
     return correct / scored, correct, scored
