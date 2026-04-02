@@ -1,31 +1,3 @@
-"""
-Run Qwen2-VL inference on the VCoT dataset.
-
-Passes each question + chart image to the model and saves responses (one sample
-at a time).
-
-Dataset `target` format: "{clicks} | <sep> | {answer}" — the final answer string
-is after `` | <sep> | `` (see preprocessing/vcot_target.py).
-
-Usage:
-  # Zero-shot baseline
-  venv/bin/python scripts/inference_qwen.py --output data/qwen_responses.json
-
-  # Static saliency baseline (pre-generate overlays first)
-  venv/bin/python scripts/make_saliency_overlays.py
-  venv/bin/python scripts/inference_qwen.py \
-      --dataset data/vcot_dataset_saliency.json \
-      --output data/qwen_responses_saliency.json
-
-  # Fine-tuned model
-  venv/bin/python scripts/inference_qwen.py \
-      --adapter_path runs/qwen_lora/best \
-      --output data/qwen_ft.json
-
-  # Resuming a partial run
-  venv/bin/python scripts/inference_qwen.py --start 1500 --output data/qwen_responses.json
-"""
-
 import argparse
 import json
 import os
