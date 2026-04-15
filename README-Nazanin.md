@@ -40,3 +40,4 @@ This project uses a virtual environment:
 SalChartQA:
 - `unified_approved.csv` — aggregate counts for each participant by question
 - `fixationByVis/` — clicks and timestamps per question (columns: x, y, time)
+-link to salchartQA : https://darus.uni-stuttgart.de/dataset.xhtml?persistentId=doi:10.18419/DARUS-3884
