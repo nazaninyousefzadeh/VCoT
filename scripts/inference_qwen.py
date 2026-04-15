@@ -1,27 +1,12 @@
-"""
-Run Qwen2-VL inference on the VCoT dataset.
-
-Passes each question + chart image to the model and saves responses (one sample
-at a time).
-
-Dataset `target` format: "{clicks} | <sep> | {answer}" — the final answer string
-is after `` | <sep> | `` (see preprocessing/vcot_target.py).
-
-Usage:
-  venv/bin/python scripts/inference_qwen.py --output data/qwen_responses.json
-  venv/bin/python scripts/inference_qwen.py --output data/qwen_responses.json --limit 1000
-  venv/bin/python scripts/inference_qwen.py --output data/qwen_responses.json --start 500 --limit 200
-"""
-
 import argparse
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import torch
 from PIL import Image
+from peft import PeftModel
 from tqdm import tqdm
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
@@ -43,9 +28,16 @@ def _ground_truth_fields(target: str) -> dict:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", default="data/vcot_dataset_unique.json")
+    p.add_argument("--dataset", default="data/vcot_dataset_unique.json",
+                   help="Dataset JSON (use data/vcot_dataset_saliency.json for saliency baseline)")
     p.add_argument("--output", default="data/qwen_responses.json")
     p.add_argument("--model_name", default="Qwen/Qwen2-VL-2B-Instruct")
+    p.add_argument(
+        "--adapter_path",
+        type=str,
+        default=None,
+        help="LoRA folder from finetuning (e.g. runs/qwen_lora/best)",
+    )
     p.add_argument("--max_new_tokens", type=int, default=256)
     p.add_argument("--start", type=int, default=0, help="Start index (for resuming)")
     p.add_argument("--limit", type=int, default=None, help="Max samples to process")
@@ -60,6 +52,7 @@ def main():
 
     end = args.start + args.limit if args.limit else len(data)
     data = data[args.start:end]
+    print(f"Dataset: {args.dataset}")
     print(f"Processing samples {args.start} to {args.start + len(data)}")
 
     # Load existing results if resuming
@@ -70,6 +63,9 @@ def main():
         print(f"Loaded {len(results)} existing results")
 
     print(f"Loading model: {args.model_name}")
+    if args.adapter_path:
+        print(f"LoRA adapter: {args.adapter_path}")
+
     if torch.backends.mps.is_available():
         device = torch.device("mps")
         dtype = torch.float16
@@ -86,10 +82,13 @@ def main():
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         args.model_name, torch_dtype=dtype
     ).to(device)
-    processor = AutoProcessor.from_pretrained(args.model_name)
+    if args.adapter_path:
+        model = PeftModel.from_pretrained(model, args.adapter_path)
+    proc_src = args.adapter_path or args.model_name
+    processor = AutoProcessor.from_pretrained(proc_src)
     print(f"Model loaded on {device}")
 
-    for i, sample in enumerate(tqdm[Any](data, desc="Inference")):
+    for i, sample in enumerate(tqdm(data, desc="Inference")):
         idx = args.start + i
         try:
             image = Image.open(sample["image"]).convert("RGB")
