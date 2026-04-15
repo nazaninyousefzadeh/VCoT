@@ -1,9 +1,0 @@
-{
-  "dataset": "data/vcot_dataset.json",
-  "seed": 42,
-  "val_ratio": 0.1,
-  "test_ratio": 0.1,
-  "train_n": 48005,
-  "val_n": 6001,
-  "test_n": 6001
-}

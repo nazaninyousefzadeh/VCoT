@@ -20,8 +20,6 @@ from transformers import Qwen2VLProcessor, Qwen2VLForConditionalGeneration
 
 _REPO = Path(__file__).resolve().parent.parent
 _RE_CLICK = re.compile(r"<click>(\d+),(\d+)</click>")
-
-# Assistant turn delimiter used by Qwen chat template
 _ASST_HEADER = "<|im_start|>assistant"
 
 
@@ -102,10 +100,6 @@ def build_int_token_map(tokenizer) -> tuple[torch.Tensor, torch.Tensor]:
         torch.tensor(vals, dtype=torch.float32),
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Differentiable expected-coordinate extraction
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _find_subseq(
     seq: torch.Tensor, pattern: list[int], start: int = 0
@@ -369,6 +363,7 @@ def generation_eval(
     verbose: bool = True,
     system_prompt: str = "",
     temperature: float = 0.0,
+    repetition_penalty: float = 1.0,
 ) -> dict[str, float]:
 
     model.eval()
@@ -400,6 +395,8 @@ def generation_eval(
             gen_kw["temperature"] = temperature
         else:
             gen_kw["do_sample"] = False
+        if repetition_penalty > 1.0:
+            gen_kw["repetition_penalty"] = repetition_penalty
         out_ids = model.generate(**inputs, **gen_kw)
         gen_ids = out_ids[0, inputs["input_ids"].shape[1]:]
         generated = processor.tokenizer.decode(gen_ids, skip_special_tokens=True)
@@ -413,9 +410,13 @@ def generation_eval(
         len_err = abs(pred_len - gt_len) / max(gt_len, 1)
         len_errors.append(len_err)
 
+        img_w = s.get("img_w", 0)
+        img_h = s.get("img_h", 0)
+        img_label = s["image"] if isinstance(s["image"], str) else f"PIL({img_w}x{img_h})"
+
         per_sample.append({
             "idx":         i,
-            "image":       s["image"],
+            "image":       img_label,
             "prompt":      s["prompt"],
             "gt_clicks":   gt_clicks,
             "pred_clicks": pred_clicks,
@@ -424,9 +425,6 @@ def generation_eval(
         })
 
         if verbose:
-            img_w = s.get("img_w", 0)
-            img_h = s.get("img_h", 0)
-            img_label = s["image"] if isinstance(s["image"], str) else f"PIL({img_w}x{img_h})"
             print(f"\n[gen_eval {i+1}/{len(samples)}] {img_label}  (img {img_w}x{img_h})")
             print(f"  Prompt  : {s['prompt']}")
             print(f"  Raw out : {generated[:200]!r}")
@@ -463,17 +461,22 @@ def evaluate_loader(
     sdtw_gamma: float,
     max_coord_clicks: int = 0,
     system_prompt: str = "",
+    max_seq_len: Optional[int] = None,
 ) -> dict[str, float | None]:
     if len(loader) == 0:
         return {"ce_loss": None, "coord_loss": None}
 
     model.eval()
     ce_total = coord_total = 0.0
-    n = n_coord = 0
+    n = n_coord = skipped = 0
     use_coord = coord_lambda > 0 and int_ids is not None
 
     for raw in loader:
         batch = build_batch(raw, processor, device, system_prompt=system_prompt)
+        if max_seq_len is not None and batch["input_ids"].shape[1] > max_seq_len:
+            skipped += 1
+            del batch
+            continue
         out = model(**batch)
         ce_total += float(out.loss.item())
         n += 1
@@ -491,8 +494,10 @@ def evaluate_loader(
                 n_coord += 1
 
     model.train()
+    if skipped:
+        print(f"  [evaluate_loader] skipped {skipped} batches (seq_len > {max_seq_len})")
     return {
-        "ce_loss":    ce_total / n,
+        "ce_loss":    ce_total / n if n > 0 else None,
         "coord_loss": coord_total / n_coord if n_coord > 0 else None,
     }
 
@@ -593,6 +598,11 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction, default=True,
     )
     p.add_argument("--max_pixels", type=int, default=401408)
+    p.add_argument(
+        "--max_seq_len", type=int, default=None,
+        help="Skip training (and val) batches whose tokenized length exceeds this. "
+             "Useful for skipping slow large-image samples. None = no limit.",
+    )
 
     # LoRA / QLoRA
     p.add_argument("--lora_r",       type=int,   default=16)
@@ -614,7 +624,7 @@ def parse_args() -> argparse.Namespace:
                    help="Max clicks per sample for coord loss (0 = no limit). "
                         "Caps expensive samples to avoid slow steps.")
     p.add_argument(
-        "--use_sdtw", action="store_true", default=True,
+        "--use_sdtw", action=argparse.BooleanOptionalAction, default=True,
         help="Use soft-DTW instead of pointwise Euclidean. "
              "Handles variable sequence lengths correctly.",
     )
@@ -630,8 +640,12 @@ def parse_args() -> argparse.Namespace:
                    help="Number of val samples to use for generation eval.")
     p.add_argument("--gen_max_new_tokens", type=int, default=512)
     p.add_argument(
-        "--gen_temperature", type=float, default=0.0,
+        "--gen_temperature", type=float, default=0.3,
         help="Generation temperature. 0 = greedy (deterministic). >0 enables sampling.",
+    )
+    p.add_argument(
+        "--gen_repetition_penalty", type=float, default=1.0,
+        help="Repetition penalty during generation. >1.0 discourages repeated coordinates.",
     )
     p.add_argument(
         "--gen_eval_fixed_slice", action="store_true",
@@ -679,7 +693,7 @@ def main() -> None:
     )
 
     # ── Processor ─────────────────────────────────────────────────────────────
-    processor = Qwen2VLProcessor.from_pretrained(args.model_name)
+    processor = Qwen2VLProcessor.from_pretrained(args.model_name, use_fast=False)
     _maybe_set_max_pixels(processor, args.max_pixels)
 
     int_ids, int_vals = build_int_token_map(processor.tokenizer)
@@ -804,6 +818,16 @@ def main() -> None:
 
         for step, raw in enumerate(pbar):
             batch = build_batch(raw, processor, device, system_prompt=args.system_prompt)
+            seq_len = batch["input_ids"].shape[1]
+            if args.max_seq_len is not None and seq_len > args.max_seq_len:
+                skipped_steps += 1
+                pbar.write(
+                    f"  [skip] step {step}: seq_len={seq_len} > max_seq_len={args.max_seq_len}"
+                )
+                del batch
+                if device.type == "mps":
+                    torch.mps.empty_cache()
+                continue
             out   = model(**batch)
             ce_loss = out.loss
 
@@ -881,6 +905,7 @@ def main() -> None:
                         model, gen_samples, processor, device, args.gen_max_new_tokens,
                         system_prompt=args.system_prompt,
                         temperature=args.gen_temperature,
+                        repetition_penalty=args.gen_repetition_penalty,
                     )
 
             postfix: dict = {
@@ -910,6 +935,7 @@ def main() -> None:
             sdtw_gamma=args.sdtw_gamma,
             max_coord_clicks=args.max_coord_clicks,
             system_prompt=args.system_prompt,
+            max_seq_len=args.max_seq_len,
         )
         val_ce    = val_metrics["ce_loss"]
         val_coord = val_metrics["coord_loss"]
@@ -935,6 +961,7 @@ def main() -> None:
                     model, gen_samples, processor, device, args.gen_max_new_tokens,
                     system_prompt=args.system_prompt,
                     temperature=args.gen_temperature,
+                    repetition_penalty=args.gen_repetition_penalty,
                 )
 
         # ── Logging ───────────────────────────────────────────────────────────

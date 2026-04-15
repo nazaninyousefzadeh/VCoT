@@ -1,28 +1,3 @@
-"""
-Evaluate inference JSON against ground_truth_answer.
-
-Typical response text ends with: ...\\nassistant\\nThe answer is Hungary.
-Matching protocol (applied in order):
-  1. Numeric GT: relaxed ±5% tolerance on any number in the assistant text.
-  2. Yes/No GT: last standalone yes/no word in the response must match.
-  3. Exact match of normalized GT vs normalized assistant text.
-  4. Order-insensitive entity match ("Iran and Pakistan" == "Pakistan and Iran").
-    5. Phrase match: GT appears verbatim (word-boundary) anywhere in the response.
-    6. Fuzzy match: SequenceMatcher ratio >= 0.9 on individual words (catches 1-char typos).
-
-Usage:
-  venv/bin/python scripts/evaluate_qwen.py data/qwen_responses.json
-  venv/bin/python scripts/evaluate_qwen.py part1.json part2.json
-  venv/bin/python scripts/evaluate_qwen.py data/out.json --examples 5
-
-  With multiple files, rows are merged by ``index``; later files overwrite
-  earlier ones for the same index (pass partial run first, resume second).
-
-  With ``--metadata-csv`` (SalChartQA ``unified_approved.csv``), also prints
-  accuracy by chart type (``image_type``) and question type (``question_type``),
-  matching each row on image file name + prompt text.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -35,6 +10,48 @@ from pathlib import Path
 from typing import Any
 
 SalchartqaLookup = dict[tuple[str, str], tuple[str, str, bool]]
+
+_VCOT_TARGET_SEP = " | <sep> | "
+
+
+def ground_truth_answer_from_target(target: str | None) -> str:
+    """Answer string after `` | <sep> | `` in a vcot ``target`` field."""
+    t = (target or "").strip()
+    if _VCOT_TARGET_SEP in t:
+        return t.split(_VCOT_TARGET_SEP, 1)[1].strip()
+    return ""
+
+
+def rows_from_merged_qa(path: Path, prediction_field: str) -> list[dict[str, Any]]:
+    """
+    Build evaluate_qwen rows from ``merge_qa_pointhead_with_unique`` output: each row
+    needs ``response`` and ``ground_truth_answer``; GT comes from ``target``.
+    """
+    with open(path, encoding="utf-8") as f:
+        rows: list[dict] = json.load(f)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        pred = r.get(prediction_field)
+        if pred is None:
+            continue
+        gt = ground_truth_answer_from_target(r.get("target"))
+        idx = r.get("qa_index")
+        if not isinstance(idx, int):
+            idx = r.get("index")
+        if not isinstance(idx, int):
+            idx = len(out)
+        out.append(
+            {
+                "index": idx,
+                "image": r.get("image"),
+                "prompt": r.get("prompt"),
+                "ground_truth_answer": gt,
+                "response": str(pred),
+            }
+        )
+    out.sort(key=lambda x: x["index"])
+    return out
+
 
 # ChartQA relaxed accuracy: |pred - gt| / |gt| <= NUMERIC_REL_TOL (gt != 0); gt == 0 uses tiny abs match.
 NUMERIC_REL_TOL = 0.05
@@ -490,9 +507,26 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Compute accuracy on inference JSON.")
     p.add_argument(
         "json_paths",
-        nargs="+",
+        nargs="*",
         type=Path,
-        help="One or more qwen_responses*.json files (merged by index, last wins)",
+        default=[],
+        help="One or more qwen_responses*.json files (merged by index, last wins). "
+        "Omit when using --merged-json.",
+    )
+    p.add_argument(
+        "--merged-json",
+        type=Path,
+        default=None,
+        help="Merged QA JSON (e.g. all_three_qa_merged_unique.json): ground truth from "
+        "`target`, predictions from --prediction-field.",
+    )
+    p.add_argument(
+        "--prediction-field",
+        type=str,
+        default=None,
+        metavar="FIELD",
+        help="Name of the answer column in --merged-json (e.g. pointhead_answer, "
+        "qwen_lora_v3_answer, gt_clicks_answer).",
     )
     p.add_argument(
         "--metadata-csv",
@@ -524,9 +558,24 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    results = merge_inference_results(args.json_paths)
-    if len(args.json_paths) > 1:
-        print(f"Merged {len(args.json_paths)} files -> {len(results)} rows")
+    if args.merged_json is not None:
+        if args.json_paths:
+            p.error("Pass either inference json_paths or --merged-json, not both.")
+        if not args.prediction_field:
+            p.error("--prediction-field is required with --merged-json (e.g. pointhead_answer).")
+        results = rows_from_merged_qa(args.merged_json, args.prediction_field)
+        print(
+            f"Merged QA: {args.merged_json}  prediction_field={args.prediction_field!r}  "
+            f"-> {len(results)} rows"
+        )
+    elif args.json_paths:
+        results = merge_inference_results(args.json_paths)
+        if len(args.json_paths) > 1:
+            print(f"Merged {len(args.json_paths)} files -> {len(results)} rows")
+    else:
+        p.error(
+            "Provide at least one inference JSON file, or use --merged-json with --prediction-field."
+        )
 
     acc, n_ok, n = accuracy(results, numeric_rel_tol=args.numeric_rel_tol)
     print(f"Accuracy: {acc:.4f} ({n_ok}/{n} scored)")
